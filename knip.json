@@ -1,0 +1,45 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "src/workers/index.ts",
+    "src/instrumentation.ts",
+    "src/instrumentation-client.ts",
+    "src/sentry.*.config.ts",
+    "scripts/*.ts",
+    "tests/**/*.test.{ts,tsx}",
+    "tests/setup.ts",
+    "playwright.config.ts",
+    "tests/e2e/**/*.ts"
+  ],
+  "project": [
+    "src/**/*.{ts,tsx}",
+    "scripts/**/*.ts",
+    "tests/**/*.{ts,tsx}"
+  ],
+  "ignore": [
+    "packages/**",
+    "next-env.d.ts",
+    "tests/stubs/**",
+    "tests/load/**"
+  ],
+  "ignoreDependencies": [
+    "autoprefixer",
+    "postcss",
+    "tailwindcss-animate",
+    "eslint-config-next",
+    "prettier",
+    "@vitest/coverage-v8",
+    "@types/pdfkit"
+  ],
+  "next": true,
+  "vitest": true,
+  "rules": {
+    "exports": "warn",
+    "types": "warn",
+    "nsExports": "warn",
+    "nsTypes": "warn",
+    "duplicates": "warn",
+    "enumMembers": "warn",
+    "classMembers": "warn"
+  }
+}

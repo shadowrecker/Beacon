@@ -1,0 +1,49 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Testing
+coverage
+
+# Next.js
+.next
+out
+dist
+build
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Misc
+*.pem
+
+# Local dev databases (Postgres/Redis data dirs)
+.devdata
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# LLM eval reports (scripts/run-evals.ts)
+tests/evals/results/
+
+# Playwright
+playwright-report/
+test-results/

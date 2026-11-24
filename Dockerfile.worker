@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1.7
+# Beacon background worker image (all BullMQ queues + maintenance schedules).
+#
+#   docker build -f Dockerfile.worker -t beacon-worker .
+#
+# The worker is compiled with tsup (path aliases resolved, single bundle) and
+# runs on plain node. Liveness/readiness: http://<host>:9464/live and /ready.
+
+ARG NODE_VERSION=22
+
+FROM node:${NODE_VERSION}-alpine AS deps
+WORKDIR /app
+RUN apk add --no-cache libc6-compat openssl
+COPY package.json package-lock.json ./
+COPY prisma ./prisma
+RUN npm ci --ignore-scripts && npx prisma generate
+
+FROM node:${NODE_VERSION}-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run worker:build
+
+FROM node:${NODE_VERSION}-alpine AS prod-deps
+WORKDIR /app
+RUN apk add --no-cache libc6-compat openssl
+COPY package.json package-lock.json ./
+COPY prisma ./prisma
+RUN npm ci --omit=dev --ignore-scripts && npx --yes prisma@6.19.3 generate && npm cache clean --force
+
+FROM node:${NODE_VERSION}-alpine AS runner
+WORKDIR /app
+RUN apk add --no-cache openssl tini curl
+ENV NODE_ENV=production \
+    SERVICE_NAME=beacon-worker \
+    WORKER_HEALTH_PORT=9464
+RUN addgroup -g 1001 -S nodejs && adduser -S worker -u 1001 -G nodejs
+# The runtime never uses package managers; removing them shrinks the image and
+# its attack surface (and keeps their bundled dependencies out of image scans).
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+      /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+      /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
+COPY --from=prod-deps --chown=worker:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=worker:nodejs /app/dist ./dist
+COPY --from=builder --chown=worker:nodejs /app/prisma ./prisma
+COPY --chown=worker:nodejs package.json ./
+
+USER worker
+EXPOSE 9464
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:9464/live || exit 1
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/workers/index.js"]

@@ -1,0 +1,31 @@
+# Never send local state, secrets or build output into the image build context.
+.git
+.github
+node_modules
+.next
+dist
+coverage
+.devdata
+*.tsbuildinfo
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Docs, reports and binaries that don't ship (at any depth)
+**/*.md
+!README.md
+**/*.docx
+**/*.pptx
+**/*.txt
+**/*.bundle
+**/generate-*.js
+docs
+
+# Tests and dev/CI tooling (scripts/ includes the eval runner, which imports tests/)
+tests
+scripts
+playwright-report
+test-results
+packages/sdk/dist

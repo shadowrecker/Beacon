@@ -1,0 +1,58 @@
+# Local development dependencies only (run the app and worker on the host):
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   npm run db:migrate:deploy && npm run dev   # and in another shell: npm run worker
+#
+# Ports are bound to 127.0.0.1 so the databases are not exposed on the network.
+# (Without Docker, the same services run from Homebrew; see SETUP.md.)
+
+name: beacon-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: beacon
+      POSTGRES_PASSWORD: beacon_dev_password
+      POSTGRES_DB: beacon
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U beacon -d beacon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - redis_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: beacon
+      MINIO_ROOT_PASSWORD: beacon_dev_password
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_dev_data:/data
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+  minio_dev_data:

@@ -1,0 +1,17 @@
+{
+  "_comment": "Accepted npm audit advisories (production deps). Each entry needs a reason tied to how Beacon uses the package and a review date. scripts/check-audit.ts fails on any high/critical advisory not listed here, and on entries past their review date.",
+  "advisories": {
+    "GHSA-effect-templateliteral-redos": {
+      "package": "effect",
+      "match": "Effect: ReDoS in Schema.TemplateLiteral",
+      "reason": "Transitive via prisma CLI config loading (@prisma/client -> prisma -> @prisma/config). Not reachable from request handling; schemas are not built from user input. Fixed by the Prisma 7 upgrade.",
+      "reviewBy": "2027-02-28"
+    },
+    "deepmerge-ts-stack-exhaustion": {
+      "package": "deepmerge-ts",
+      "match": "DeepmergeTS has stack exhaustion",
+      "reason": "Transitive via prisma CLI config loading. Only merges Prisma's own configuration objects, never user data. Fixed by the Prisma 7 upgrade.",
+      "reviewBy": "2027-02-28"
+    }
+  }
+}

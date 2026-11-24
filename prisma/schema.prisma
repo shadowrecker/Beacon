@@ -1,0 +1,1768 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// User model - represents authenticated users via Clerk.
+// Provisioned from the Clerk webhook (user.created/updated/deleted); email can be
+// null until Clerk reports a primary address, and NULLs do not collide on @unique.
+model User {
+  id                String   @id @default(cuid())
+  clerkId           String   @unique
+  email             String?  @unique
+  name              String?
+  avatarUrl         String?
+  /// Per-type notification channel preferences, e.g. {"COMMENT_MENTION": {"email": false}}
+  notificationPrefs Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  projects           Project[]
+  queries            Query[]
+  orgMembers         OrgMember[]
+  comments           Comment[]
+  notifications      Notification[]
+  decisionLogs       DecisionLog[]
+  knowledgeQueries   KnowledgeQuery[]
+  presentations      Presentation[]
+  voiceRecordings    VoiceRecording[]    @relation("UserVoiceRecordings")
+  quickCaptures      QuickCapture[]      @relation("UserQuickCaptures")
+  orgInvitesSent     OrgInvite[]         @relation("OrgInvitesSent")
+  teamActivities     TeamActivity[]
+  integrations       Integration[]
+  competitorProfiles CompetitorProfile[]
+  competitorAlerts   CompetitorAlert[]
+  coachInsights      CoachInsight[]
+  coachSessions      CoachSession[]
+  workflows          Workflow[]
+
+  @@map("users")
+}
+
+// Project model - represents a product decision intelligence project.
+// Every project belongs to an organization (a user's personal org by default);
+// userId records the creator.
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  userId      String
+  orgId       String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization       Organization            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  documents          Document[]
+  chunks             Chunk[]
+  jobRuns            JobRun[]
+  syntheses          Synthesis[]
+  recommendations    Recommendation[]
+  queries            Query[]
+  comments           Comment[]
+  roadmaps           Roadmap[]
+  analyticsImports   AnalyticsImport[]
+  usageCorrelations  UsageCorrelation[]
+  gapAnalyses        GapAnalysis[]
+  decisionLogs       DecisionLog[]
+  sentimentSnapshots SentimentSnapshot[]
+  churnPredictions   ChurnPrediction[]
+  sentimentAlerts    SentimentAlert[]
+  knowledgeNodes     KnowledgeNode_Project[]
+  voiceRecordings    VoiceRecording[]        @relation("ProjectVoiceRecordings")
+  quickCaptures      QuickCapture[]          @relation("ProjectQuickCaptures")
+  coachInsights      CoachInsight[]
+  workflows          Workflow[]
+  presentations      Presentation[]
+
+  @@index([userId])
+  @@index([orgId])
+  @@index([createdAt])
+  @@map("projects")
+}
+
+// Document model - represents ingested content (transcripts, tickets, notes, recordings).
+// `type` is the semantic kind; `mimeType` drives parsing. Content is only ever read
+// from `storageKey` in the application bucket (never from a client-supplied URL), or
+// from `processedText` when the source already provided text (integrations, voice).
+model Document {
+  id                    String         @id @default(cuid())
+  projectId             String
+  title                 String
+  type                  DocumentType
+  source                DocumentSource @default(UPLOAD)
+  mimeType              String?
+  storageKey            String?
+  fileSize              Int?
+  /// Original URL for URL imports (fetched server-side through the SSRF-safe fetcher).
+  sourceUrl             String?
+  processedText         String?        @db.Text
+  metadata              Json?
+  status                DocumentStatus @default(PENDING)
+  errorMessage          String?        @db.Text
+  integrationId         String?
+  externalId            String?
+  createdById           String?
+  processingStartedAt   DateTime?
+  processingCompletedAt DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  integration    Integration?    @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  chunks         Chunk[]
+  voiceRecording VoiceRecording?
+
+  @@unique([integrationId, externalId])
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@map("documents")
+}
+
+enum DocumentSource {
+  UPLOAD
+  URL
+  INTEGRATION
+  VOICE
+  QUICK_CAPTURE
+}
+
+enum DocumentType {
+  TRANSCRIPT
+  SUPPORT_TICKET
+  NOTE
+  CALL_RECORDING
+  OTHER
+}
+
+enum DocumentStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+// Chunk model - processed document chunks with embeddings.
+// `embedding` is written only via raw SQL (Prisma cannot write Unsupported types).
+// `projectId` is denormalized so the ANN query filters without a join.
+// The HNSW and full-text indexes live in the baseline migration SQL.
+model Chunk {
+  id             String                       @id @default(cuid())
+  documentId     String
+  projectId      String
+  content        String                       @db.Text
+  embedding      Unsupported("vector(1536)")?
+  embeddingModel String?
+  /// Ordinal of the chunk within the document (0-based).
+  position       Int
+  /// Character offsets into the document's processedText.
+  startOffset    Int?
+  endOffset      Int?
+  tokenCount     Int
+  /// Speaker, page number, etc.
+  metadata       Json?
+  createdAt      DateTime                     @default(now())
+
+  document  Document   @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  citations Citation[]
+
+  @@unique([documentId, position])
+  @@index([projectId])
+  @@map("chunks")
+}
+
+// Synthesis model - represents analysis results (themes, pain points, feature requests)
+model Synthesis {
+  id             String          @id @default(cuid())
+  projectId      String
+  type           SynthesisType
+  output         Json?
+  modelUsed      String?
+  status         SynthesisStatus @default(PENDING)
+  errorMessage   String?         @db.Text
+  createdById    String?
+  /// Workflow causation depth of the event that requested this synthesis (0 for
+  /// user/scheduled runs). Events the synthesis emits carry this depth, so the
+  /// workflow loop guard covers RUN_SYNTHESIS chains.
+  causationDepth Int             @default(0)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  themes          Theme[]
+  recommendations Recommendation[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("syntheses")
+}
+
+enum SynthesisType {
+  THEMES
+  PAIN_POINTS
+  FEATURE_REQUESTS
+  FULL
+}
+
+enum SynthesisStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+// Theme model - represents extracted themes from synthesis
+model Theme {
+  id              String    @id @default(cuid())
+  synthesisId     String
+  name            String
+  description     String    @db.Text
+  sentiment       Sentiment
+  confidenceScore Float
+  createdAt       DateTime  @default(now())
+
+  synthesis         Synthesis          @relation(fields: [synthesisId], references: [id], onDelete: Cascade)
+  citations         Citation[]
+  usageCorrelations UsageCorrelation[]
+
+  @@index([synthesisId])
+  @@map("themes")
+}
+
+enum Sentiment {
+  POSITIVE
+  NEGATIVE
+  NEUTRAL
+  MIXED
+}
+
+// Citation model - represents evidence for themes from document chunks
+model Citation {
+  id             String @id @default(cuid())
+  themeId        String
+  chunkId        String
+  quote          String @db.Text
+  relevanceScore Float
+
+  theme Theme @relation(fields: [themeId], references: [id], onDelete: Cascade)
+  chunk Chunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+
+  @@index([themeId])
+  @@index([chunkId])
+  @@map("citations")
+}
+
+// Recommendation model - represents product recommendations
+model Recommendation {
+  id               String               @id @default(cuid())
+  projectId        String
+  synthesisId      String?
+  title            String
+  description      String               @db.Text
+  impact           RecommendationImpact
+  confidence       Float
+  evidence         Json?
+  status           RecommendationStatus @default(DRAFT)
+  segments         String[]
+  /// Generated feature brief, reused by the handoff exporter.
+  brief            Json?
+  briefGeneratedAt DateTime?
+  /// JobRun that produced this recommendation (idempotent re-runs replace by run).
+  runId            String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  project          Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  synthesis        Synthesis?        @relation(fields: [synthesisId], references: [id], onDelete: SetNull)
+  outcomeTrackings OutcomeTracking[]
+  decisionLogs     DecisionLog[]
+
+  @@index([projectId])
+  @@index([synthesisId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("recommendations")
+}
+
+enum RecommendationImpact {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum RecommendationStatus {
+  DRAFT
+  ACCEPTED
+  REJECTED
+  IMPLEMENTED
+}
+
+// Query model - represents user questions and AI-generated answers
+model Query {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  question  String
+  answer    String?  @db.Text
+  citations Json?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("queries")
+}
+
+// ============================================================================
+// Organization & Team Models
+// ============================================================================
+
+enum OrgMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum OrgPlan {
+  FREE
+  TEAM
+  ENTERPRISE
+}
+
+model Organization {
+  id         String   @id @default(cuid())
+  name       String
+  slug       String   @unique
+  /// Writable only through the server-side admin path (never via the org update API).
+  plan       OrgPlan  @default(FREE)
+  /// A user's personal workspace, created automatically at sign-up.
+  isPersonal Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  members                   OrgMember[]
+  invites                   OrgInvite[]
+  domainEvents              DomainEvent[]
+  tokenUsage                TokenUsage[]
+  knowledgeMergeSuggestions KnowledgeMergeSuggestion[]
+  projects                  Project[]
+  teamActivities            TeamActivity[]
+  integrations              Integration[]
+  competitorProfiles        CompetitorProfile[]
+  customAIConfigs           CustomAIConfig[]
+  presentationTemplates     PresentationTemplate[]
+  knowledgeEntities         KnowledgeEntity[]
+  knowledgeQueries          KnowledgeQuery[]
+  apiKeys                   ApiKey[]                   @relation("OrgApiKeys")
+  webhooks                  Webhook[]                  @relation("OrgWebhooks")
+  workflows                 Workflow[]
+
+  @@index([slug])
+  @@index([createdAt])
+  @@map("organizations")
+}
+
+model OrgMember {
+  id        String        @id @default(cuid())
+  orgId     String
+  userId    String
+  role      OrgMemberRole @default(MEMBER)
+  invitedAt DateTime      @default(now())
+  joinedAt  DateTime?
+  createdAt DateTime      @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@map("org_members")
+}
+
+/// Pending invitation to an organization. The raw token is emailed once; only its
+/// SHA-256 hash is stored. Acceptance requires the signed-in user's email to match.
+model OrgInvite {
+  id          String        @id @default(cuid())
+  orgId       String
+  email       String
+  role        OrgMemberRole @default(MEMBER)
+  tokenHash   String        @unique
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime      @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  invitedBy    User         @relation("OrgInvitesSent", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, email])
+  @@map("org_invites")
+}
+
+model TeamActivity {
+  id           String   @id @default(cuid())
+  orgId        String
+  userId       String
+  projectId    String?
+  action       String
+  resourceType String
+  resourceId   String
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("team_activities")
+}
+
+// ============================================================================
+// Integration Hub Models
+// ============================================================================
+
+enum IntegrationProvider {
+  INTERCOM
+  ZENDESK
+  GONG
+  SLACK
+  HUBSPOT
+  AMPLITUDE
+  MIXPANEL
+  SALESFORCE
+  LINEAR
+  JIRA
+  NOTION
+  PRODUCTBOARD
+}
+
+enum IntegrationStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum SyncStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+/// One connection per provider per organization. `credentialsEncrypted` holds an
+/// AES-256-GCM envelope (see src/lib/crypto.ts); plaintext credentials never touch the DB.
+model Integration {
+  id                    String              @id @default(cuid())
+  orgId                 String
+  /// User who connected the integration.
+  userId                String
+  /// Project that synced records are written into.
+  projectId             String?
+  provider              IntegrationProvider
+  status                IntegrationStatus   @default(DISCONNECTED)
+  credentialsEncrypted  String?             @db.Text
+  credentialsKeyVersion Int?
+  config                Json?
+  /// Provider-specific incremental sync cursor.
+  syncCursor            Json?
+  lastSyncAt            DateTime?
+  lastError             String?             @db.Text
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  organization      Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  syncs             IntegrationSync[]
+  analyticsImports  AnalyticsImport[]
+  documents         Document[]
+  connectorInstalls ConnectorInstall[]
+
+  @@unique([orgId, provider])
+  @@index([userId])
+  @@index([status])
+  @@map("integrations")
+}
+
+model IntegrationSync {
+  id               String     @id @default(cuid())
+  integrationId    String
+  status           SyncStatus @default(PENDING)
+  recordsProcessed Int        @default(0)
+  errorMessage     String?    @db.Text
+  startedAt        DateTime   @default(now())
+  completedAt      DateTime?
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([integrationId, startedAt])
+  @@index([status])
+  @@map("integration_syncs")
+}
+
+// ============================================================================
+// Competitive Intelligence Models
+// ============================================================================
+
+model CompetitorProfile {
+  id            String    @id @default(cuid())
+  orgId         String
+  /// User who added the competitor.
+  userId        String
+  name          String
+  website       String?
+  description   String?   @db.Text
+  /// Reference link only; review data is not scraped.
+  g2Url         String?
+  captureUrl    String?
+  metadata      Json?
+  lastScannedAt DateTime?
+  lastScanError String?   @db.Text
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  organization Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  updates      CompetitorUpdate[]
+  alerts       CompetitorAlert[]
+
+  @@index([orgId])
+  @@index([userId])
+  @@map("competitor_profiles")
+}
+
+enum CompetitorUpdateType {
+  CHANGELOG
+  REVIEW
+  PRESS
+  PRICING
+  FEATURE
+}
+
+model CompetitorUpdate {
+  id           String               @id @default(cuid())
+  competitorId String
+  type         CompetitorUpdateType
+  title        String
+  content      String               @db.Text
+  sourceUrl    String?
+  /// Hash of the source content, so re-scans don't duplicate updates.
+  contentHash  String?
+  /// True when entered manually (e.g. review insights, which are never scraped).
+  isManual     Boolean              @default(false)
+  sentiment    Sentiment            @default(NEUTRAL)
+  detectedAt   DateTime             @default(now())
+  createdAt    DateTime             @default(now())
+
+  competitor CompetitorProfile @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+
+  @@unique([competitorId, contentHash])
+  @@index([competitorId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("competitor_updates")
+}
+
+model CompetitorAlert {
+  id           String   @id @default(cuid())
+  competitorId String
+  userId       String
+  type         String
+  message      String   @db.Text
+  isRead       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  competitor CompetitorProfile @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([competitorId])
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
+  @@map("competitor_alerts")
+}
+
+// ============================================================================
+// Roadmap Comparison Models
+// ============================================================================
+
+enum RoadmapSource {
+  MANUAL
+  CSV
+  LINEAR
+  JIRA
+  NOTION
+  PRODUCTBOARD
+}
+
+enum RoadmapItemStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum RoadmapItemPriority {
+  P0
+  P1
+  P2
+  P3
+}
+
+model Roadmap {
+  id         String        @id @default(cuid())
+  projectId  String
+  name       String
+  source     RoadmapSource @default(MANUAL)
+  importedAt DateTime?
+  metadata   Json?
+  createdAt  DateTime      @default(now())
+
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items       RoadmapItem[]
+  gapAnalyses GapAnalysis[]
+
+  @@index([projectId])
+  @@index([createdAt])
+  @@map("roadmaps")
+}
+
+model RoadmapItem {
+  id          String              @id @default(cuid())
+  roadmapId   String
+  title       String
+  description String?             @db.Text
+  status      RoadmapItemStatus   @default(PLANNED)
+  priority    RoadmapItemPriority @default(P2)
+  quarter     String?
+  externalId  String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  roadmap Roadmap @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+
+  @@unique([roadmapId, externalId])
+  @@index([roadmapId])
+  @@index([status])
+  @@index([priority])
+  @@map("roadmap_items")
+}
+
+model GapAnalysis {
+  id              String    @id @default(cuid())
+  projectId       String
+  roadmapId       String
+  synthesisId     String?
+  status          JobStatus @default(PENDING)
+  errorMessage    String?   @db.Text
+  output          Json?
+  evidenceDensity Json?
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  roadmap Roadmap @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([roadmapId])
+  @@index([createdAt])
+  @@map("gap_analyses")
+}
+
+// ============================================================================
+// Usage Data Overlay Models
+// ============================================================================
+
+enum AnalyticsSource {
+  AMPLITUDE
+  MIXPANEL
+  POSTHOG
+  CSV
+}
+
+model AnalyticsImport {
+  id            String          @id @default(cuid())
+  projectId     String
+  integrationId String?
+  source        AnalyticsSource
+  data          Json
+  importedAt    DateTime        @default(now())
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  integration Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([integrationId])
+  @@index([importedAt])
+  @@map("analytics_imports")
+}
+
+model UsageCorrelation {
+  id               String   @id @default(cuid())
+  projectId        String
+  themeId          String
+  featureName      String
+  usageMetric      String
+  correlationScore Float
+  /// "positive" | "negative" | "neutral"
+  direction        String   @default("neutral")
+  insight          String   @db.Text
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  theme   Theme   @relation(fields: [themeId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, themeId, featureName, usageMetric])
+  @@index([projectId])
+  @@index([themeId])
+  @@index([createdAt])
+  @@map("usage_correlations")
+}
+
+// ============================================================================
+// Collaboration Models
+// ============================================================================
+
+enum CommentTargetType {
+  THEME
+  RECOMMENDATION
+  SYNTHESIS
+  DOCUMENT
+  DECISION
+}
+
+enum NotificationType {
+  COMMENT_MENTION
+  COMMENT_REPLY
+  SYNTHESIS_COMPLETE
+  RECOMMENDATION_GENERATED
+  INTEGRATION_SYNC
+  COMPETITOR_ALERT
+  SENTIMENT_ALERT
+  OUTCOME_UPDATE
+  ORG_INVITE
+  WORKFLOW
+  SYSTEM
+}
+
+model Comment {
+  id         String            @id @default(cuid())
+  userId     String
+  projectId  String
+  targetType CommentTargetType
+  targetId   String
+  content    String            @db.Text
+  parentId   String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[] @relation("CommentReplies")
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([targetType, targetId])
+  @@map("comments")
+}
+
+model Notification {
+  id           String           @id @default(cuid())
+  userId       String
+  type         NotificationType
+  title        String
+  message      String           @db.Text
+  resourceType String?
+  resourceId   String?
+  isRead       Boolean          @default(false)
+  createdAt    DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@map("notifications")
+}
+
+// ============================================================================
+// Continuous Learning / Outcomes Models
+// ============================================================================
+
+enum OutcomeStatus {
+  NOT_SHIPPED
+  SHIPPED
+  MEASURING
+  MEASURED
+}
+
+model OutcomeTracking {
+  id               String        @id @default(cuid())
+  recommendationId String
+  status           OutcomeStatus @default(NOT_SHIPPED)
+  shippedAt        DateTime?
+  metricName       String?
+  baselineValue    Float?
+  currentValue     Float?
+  targetValue      Float?
+  notes            String?       @db.Text
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+
+  @@unique([recommendationId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("outcome_trackings")
+}
+
+model DecisionLog {
+  id               String   @id @default(cuid())
+  projectId        String
+  userId           String
+  recommendationId String?
+  decision         String   @db.Text
+  reasoning        String   @db.Text
+  evidence         Json?
+  evidenceLinks    String[]
+  outcome          String?
+  createdAt        DateTime @default(now())
+
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recommendation Recommendation? @relation(fields: [recommendationId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("decision_logs")
+}
+
+// ============================================================================
+// Custom AI Models
+// ============================================================================
+
+model CustomAIConfig {
+  id                   String   @id @default(cuid())
+  orgId                String
+  taxonomy             Json?
+  templates            Json?
+  industryPreset       String?
+  systemPromptOverride String?  @db.Text
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId])
+  @@map("custom_ai_configs")
+}
+
+// ============================================================================
+// AI PM Coach Models
+// ============================================================================
+
+enum CoachInsightType {
+  FRAMEWORK_SUGGESTION
+  PROCESS_IMPROVEMENT
+  BEST_PRACTICE
+  WARNING
+  NUDGE
+}
+
+enum CoachInsightPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum CoachInsightStatus {
+  NEW
+  SEEN
+  ACTIONED
+  DISMISSED
+}
+
+model CoachInsight {
+  id        String               @id @default(cuid())
+  userId    String
+  projectId String?
+  type      CoachInsightType
+  title     String
+  message   String               @db.Text
+  evidence  Json?
+  priority  CoachInsightPriority @default(MEDIUM)
+  status    CoachInsightStatus   @default(NEW)
+  createdAt DateTime             @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("coach_insights")
+}
+
+model CoachSession {
+  id              String   @id @default(cuid())
+  userId          String
+  context         Json?
+  recommendations Json?
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("coach_sessions")
+}
+
+// ============================================================================
+// Workflow Automation Models
+// ============================================================================
+
+enum WorkflowEvent {
+  THEME_DETECTED
+  RECOMMENDATION_GENERATED
+  SYNTHESIS_COMPLETED
+  COMPETITOR_UPDATE
+  GAP_DETECTED
+  CORRELATION_FOUND
+  DOCUMENT_UPLOADED
+}
+
+enum WorkflowActionType {
+  CREATE_BRIEF
+  NOTIFY_SLACK
+  NOTIFY_EMAIL
+  ASSIGN_USER
+  ADD_TO_ROADMAP
+  EXPORT_TO_LINEAR
+  EXPORT_TO_JIRA
+  ALERT_TEAM
+  RUN_SYNTHESIS
+}
+
+enum WorkflowRunStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL_FAILURE
+  FAILED
+}
+
+model Workflow {
+  id          String    @id @default(cuid())
+  projectId   String
+  orgId       String?
+  name        String
+  description String?   @db.Text
+  trigger     Json // {event, conditions}
+  actions     Json // [{type, params}]
+  enabled     Boolean   @default(true)
+  createdBy   String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastRunAt   DateTime?
+  runCount    Int       @default(0)
+
+  project      Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+  user         User          @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  runs         WorkflowRun[]
+
+  @@index([projectId])
+  @@index([orgId])
+  @@index([enabled])
+  @@index([createdAt])
+  @@map("workflows")
+}
+
+model WorkflowRun {
+  id              String            @id @default(cuid())
+  workflowId      String
+  /// DomainEvent that triggered the run (null for manual runs). Unique per workflow
+  /// so a redelivered event never runs the same workflow twice.
+  eventId         String?
+  /// How many workflow-triggered events deep this run is (loop guard).
+  causationDepth  Int               @default(0)
+  status          WorkflowRunStatus
+  triggerData     Json?
+  actionsExecuted Json?
+  error           String?
+  startedAt       DateTime          @default(now())
+  completedAt     DateTime?
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, eventId])
+  @@index([workflowId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("workflow_runs")
+}
+
+// ============================================================================
+// Update Relations for Existing Models
+// ============================================================================
+
+// Add relations to User for Coach and Workflow models
+// (CoachInsight, CoachSession, Workflow already reference User above)
+
+// ============================================================================
+// Presentation Generator Models
+// ============================================================================
+
+enum PresentationAudience {
+  EXECUTIVE
+  ENGINEERING
+  CUSTOMER
+  BOARD
+  SALES
+  INVESTOR
+}
+
+enum PresentationType {
+  SYNTHESIS_READOUT
+  RECOMMENDATION_PITCH
+  QBR
+  LAUNCH_BRIEF
+  CUSTOM
+}
+
+enum PresentationStatus {
+  GENERATING
+  READY
+  FAILED
+}
+
+model Presentation {
+  id           String               @id @default(cuid())
+  projectId    String
+  userId       String
+  title        String
+  audience     PresentationAudience
+  type         PresentationType
+  status       PresentationStatus   @default(GENERATING)
+  errorMessage String?              @db.Text
+  slidesData   Json? // Array of slide objects with content
+  /// Storage keys (served via short-lived presigned GET URLs).
+  pdfUrl       String?
+  pptxUrl      String?
+  /// Validated as a #RRGGBB hex color at the API boundary.
+  themeColor   String               @default("#3B82F6")
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("presentations")
+}
+
+model PresentationTemplate {
+  id           String               @id @default(cuid())
+  name         String
+  description  String?              @db.Text
+  audience     PresentationAudience
+  type         PresentationType
+  structure    Json // Array of slide blueprints with layout and content placeholders
+  thumbnailUrl String?
+  isPublic     Boolean              @default(true)
+  orgId        String?
+  createdBy    String
+  createdAt    DateTime             @default(now())
+
+  organization Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  @@index([audience])
+  @@index([type])
+  @@index([isPublic])
+  @@index([createdAt])
+  @@map("presentation_templates")
+}
+
+// Add Presentation relation to User
+// (Presentation model above references User)
+
+// ============================================================================
+// Integration Marketplace Models
+// ============================================================================
+
+enum MarketplaceCategory {
+  SUPPORT
+  CRM
+  ANALYTICS
+  COMMUNICATION
+  PRODUCT
+  RESEARCH
+  CUSTOM
+}
+
+enum AuthType {
+  OAUTH2
+  API_KEY
+  BASIC
+  BEARER
+}
+
+enum ConnectorPricing {
+  FREE
+  PAID
+  ENTERPRISE
+}
+
+enum ConnectorInstallStatus {
+  INSTALLED
+  CONFIGURED
+  ACTIVE
+  DISABLED
+}
+
+model MarketplaceConnector {
+  id              String              @id @default(cuid())
+  slug            String              @unique
+  name            String
+  description     String
+  longDescription String?             @db.Text
+  category        MarketplaceCategory
+  provider        String
+  logoUrl         String?
+  screenshotUrls  String[]
+  authType        AuthType
+  setupGuide      String?             @db.Text
+  capabilities    Json // Array of capability strings
+  pricing         ConnectorPricing
+  publisherName   String
+  publisherUrl    String?
+  isOfficial      Boolean             @default(false)
+  isVerified      Boolean             @default(false)
+  version         String              @default("1.0.0")
+  installCount    Int                 @default(0)
+  ratingAverage   Float               @default(0)
+  ratingCount     Int                 @default(0)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  reviews  ConnectorReview[]
+  installs ConnectorInstall[]
+
+  @@index([slug])
+  @@index([category])
+  @@index([isOfficial])
+  @@index([isVerified])
+  @@index([createdAt])
+  @@map("marketplace_connectors")
+}
+
+model ConnectorReview {
+  id          String   @id @default(cuid())
+  connectorId String
+  userId      String
+  orgId       String?
+  rating      Int // 1-5
+  title       String?
+  content     String?  @db.Text
+  helpful     Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  connector    MarketplaceConnector  @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  helpfulVotes ConnectorReviewVote[]
+
+  @@unique([connectorId, userId])
+  @@index([connectorId])
+  @@index([userId])
+  @@map("connector_reviews")
+}
+
+/// One "helpful" vote per user per review.
+model ConnectorReviewVote {
+  id        String   @id @default(cuid())
+  reviewId  String
+  userId    String
+  createdAt DateTime @default(now())
+
+  review ConnectorReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  @@unique([reviewId, userId])
+  @@map("connector_review_votes")
+}
+
+model ConnectorInstall {
+  id            String                 @id @default(cuid())
+  connectorId   String
+  orgId         String
+  installedBy   String
+  integrationId String?
+  configuredAt  DateTime?
+  status        ConnectorInstallStatus @default(INSTALLED)
+  createdAt     DateTime               @default(now())
+
+  connector   MarketplaceConnector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  integration Integration?         @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+
+  @@unique([connectorId, orgId])
+  @@index([orgId])
+  @@index([status])
+  @@map("connector_installs")
+}
+
+// Update Organization to include marketplace relations
+// (Organization model already has templates relation above)
+
+// ============================================================================
+// Sentiment & Churn Prediction Models
+// ============================================================================
+
+enum SentimentPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SentimentAlertType {
+  TREND_DECLINE
+  SPIKE_NEGATIVE
+  THEME_EMERGING
+  SEGMENT_RISK
+}
+
+enum AlertStatus {
+  NEW
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+model SentimentSnapshot {
+  id              String          @id @default(cuid())
+  projectId       String
+  /// "all" for the project-wide snapshot; segment name otherwise.
+  customerSegment String          @default("all")
+  period          SentimentPeriod
+  periodStart     DateTime
+  periodEnd       DateTime
+  overallScore    Float // -1.0 to 1.0
+  volume          Int
+  positiveCount   Int
+  neutralCount    Int
+  negativeCount   Int
+  topThemes       Json? // Array of theme objects with sentiment breakdown
+  riskLevel       RiskLevel
+  createdAt       DateTime        @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, period, periodStart, customerSegment])
+  @@index([projectId, periodStart])
+  @@index([riskLevel])
+  @@map("sentiment_snapshots")
+}
+
+/// Labeled "AI risk assessment" in the product: an LLM judgement from
+/// the listed signals, not a statistical prediction.
+model ChurnPrediction {
+  id                 String    @id @default(cuid())
+  projectId          String
+  /// JobRun that produced this assessment; a re-run replaces the previous run's rows.
+  runId              String?
+  customerId         String?
+  customerName       String?
+  segment            String?
+  churnProbability   Float // 0.0 to 1.0, model-estimated risk score
+  riskLevel          RiskLevel
+  signals            Json // Array of contributing factors
+  recommendations    Json // Array of mitigation strategies
+  predictedChurnDate DateTime?
+  confidence         Float
+  methodology        String    @default("AI_RISK_ASSESSMENT")
+  createdAt          DateTime  @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([riskLevel])
+  @@index([churnProbability])
+  @@index([createdAt])
+  @@map("churn_predictions")
+}
+
+model SentimentAlert {
+  id          String             @id @default(cuid())
+  projectId   String
+  type        SentimentAlertType
+  severity    RiskLevel
+  title       String
+  description String             @db.Text
+  dataPoints  Json? // Supporting data
+  status      AlertStatus        @default(NEW)
+  createdAt   DateTime           @default(now())
+  resolvedAt  DateTime?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+  @@map("sentiment_alerts")
+}
+
+// ============================================================================
+// Knowledge Graph Models
+// ============================================================================
+
+enum EntityType {
+  PERSON
+  COMPANY
+  PRODUCT
+  FEATURE
+  CONCEPT
+  PAIN_POINT
+  PERSONA
+  COMPETITOR
+  USE_CASE
+}
+
+enum RelationType {
+  MENTIONS
+  RELATES_TO
+  CAUSES
+  SOLVES
+  COMPETES_WITH
+  USED_BY
+  PART_OF
+  SIMILAR_TO
+  CONFLICTS_WITH
+}
+
+model KnowledgeEntity {
+  id             String                       @id @default(cuid())
+  orgId          String
+  type           EntityType
+  name           String
+  normalizedName String // lowercase for deduplication
+  aliases        String[]
+  description    String?                      @db.Text
+  embedding      Unsupported("vector(1536)")?
+  embeddingModel String?
+  metadata       Json?
+  confidence     Float
+  firstSeenAt    DateTime                     @default(now())
+  lastSeenAt     DateTime                     @default(now())
+  mentionCount   Int                          @default(1)
+  createdAt      DateTime                     @default(now())
+
+  organization             Organization               @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  relationsFrom            KnowledgeRelation[]        @relation("source")
+  relationsTo              KnowledgeRelation[]        @relation("target")
+  projectNodes             KnowledgeNode_Project[]
+  mergeSuggestionsAsSource KnowledgeMergeSuggestion[] @relation("mergeSource")
+  mergeSuggestionsAsTarget KnowledgeMergeSuggestion[] @relation("mergeTarget")
+
+  @@unique([orgId, normalizedName, type])
+  @@index([orgId, type])
+  @@map("knowledge_entities")
+}
+
+enum MergeSuggestionStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+/// Likely-duplicate entity pairs found by embedding similarity. Merges happen only
+/// when a human accepts the suggestion; nothing is auto-merged.
+model KnowledgeMergeSuggestion {
+  id          String                @id @default(cuid())
+  orgId       String
+  sourceId    String
+  targetId    String
+  similarity  Float
+  status      MergeSuggestionStatus @default(PENDING)
+  decidedById String?
+  decidedAt   DateTime?
+  createdAt   DateTime              @default(now())
+
+  organization Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  source       KnowledgeEntity @relation("mergeSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  target       KnowledgeEntity @relation("mergeTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId])
+  @@index([orgId, status])
+  @@map("knowledge_merge_suggestions")
+}
+
+model KnowledgeRelation {
+  id                String       @id @default(cuid())
+  sourceId          String
+  targetId          String
+  type              RelationType
+  strength          Float // 0.0 to 1.0
+  evidenceDocuments String[]
+  evidenceChunkIds  String[]
+  evidenceQuotes    Json? // Array of quote objects
+  firstSeenAt       DateTime     @default(now())
+  lastSeenAt        DateTime     @default(now())
+  createdAt         DateTime     @default(now())
+
+  source KnowledgeEntity @relation("source", fields: [sourceId], references: [id], onDelete: Cascade)
+  target KnowledgeEntity @relation("target", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId, type])
+  @@index([sourceId])
+  @@index([targetId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("knowledge_relations")
+}
+
+model KnowledgeNode_Project {
+  id        String   @id @default(cuid())
+  entityId  String
+  projectId String
+  createdAt DateTime @default(now())
+
+  entity  KnowledgeEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  project Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([entityId, projectId])
+  @@index([projectId])
+  @@index([entityId])
+  @@map("knowledge_node_projects")
+}
+
+model KnowledgeQuery {
+  id        String   @id @default(cuid())
+  orgId     String
+  userId    String
+  query     String   @db.Text
+  results   Json? // Serialized graph traversal results
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("knowledge_queries")
+}
+
+// ============================================================================
+// Voice-to-Insight Models
+// ============================================================================
+
+enum VoiceRecordingStatus {
+  RECORDING
+  UPLOADING
+  TRANSCRIBING
+  ANALYZING
+  READY
+  FAILED
+}
+
+model VoiceRecording {
+  id                 String               @id @default(cuid())
+  projectId          String?
+  userId             String
+  title              String?
+  duration           Int // seconds
+  /// Server-generated storage key in the application bucket. Deepgram receives a
+  /// short-lived presigned GET URL for it; the client never supplies a URL.
+  audioKey           String
+  mimeType           String?
+  transcriptText     String?              @db.Text
+  /// Diarized utterances: [{speaker, start, end, text}]
+  transcriptSegments Json?
+  /// Document created from the transcript so voice flows into synthesis/RAG.
+  documentId         String?              @unique
+  status             VoiceRecordingStatus @default(RECORDING)
+  errorMessage       String?              @db.Text
+  recordedAt         DateTime
+  processedAt        DateTime?
+  deviceInfo         Json? // Device metadata from client
+  createdAt          DateTime             @default(now())
+
+  user          User           @relation("UserVoiceRecordings", fields: [userId], references: [id], onDelete: Cascade)
+  project       Project?       @relation("ProjectVoiceRecordings", fields: [projectId], references: [id], onDelete: Cascade)
+  document      Document?      @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  insight       VoiceInsight?
+  quickCaptures QuickCapture[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("voice_recordings")
+}
+
+model VoiceInsight {
+  id                 String   @id @default(cuid())
+  recordingId        String   @unique
+  summary            String   @db.Text
+  keyPoints          Json? // Array of key points
+  painPoints         Json? // Array of pain points
+  actionItems        Json? // Array of action items
+  questions          Json? // Array of questions asked
+  sentimentScore     Float // -1.0 to 1.0
+  themes             String[] // Array of themes
+  suggestedFollowUps Json? // Array of follow-up suggestions
+  claudeAnalysis     Json? // Full structured response from Claude
+  createdAt          DateTime @default(now())
+
+  recording VoiceRecording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+
+  @@index([recordingId])
+  @@index([createdAt])
+  @@map("voice_insights")
+}
+
+enum QuickCaptureType {
+  VOICE_NOTE
+  QUICK_THOUGHT
+  CALL_HIGHLIGHT
+}
+
+model QuickCapture {
+  id              String           @id @default(cuid())
+  userId          String
+  projectId       String?
+  type            QuickCaptureType
+  content         String           @db.Text
+  audioUrl        String?
+  durationSec     Int?
+  syncedToProject Boolean          @default(false)
+  recordingId     String?
+  createdAt       DateTime         @default(now())
+
+  user      User            @relation("UserQuickCaptures", fields: [userId], references: [id], onDelete: Cascade)
+  project   Project?        @relation("ProjectQuickCaptures", fields: [projectId], references: [id], onDelete: Cascade)
+  recording VoiceRecording? @relation(fields: [recordingId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("quick_captures")
+}
+
+// ============================================================================
+// Developer API Platform Models
+// ============================================================================
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  orgId      String
+  name       String
+  /// SHA-256 of the full key (keys are 256-bit random, so no slow hash is needed).
+  keyHash    String    @unique
+  /// Display-only prefix, e.g. "bk_live_ab12".
+  prefix     String
+  scopes     String[] // allowlisted, e.g. ["projects:read", "documents:write"]
+  createdBy  String
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  rateLimit  Int       @default(600) // requests per minute (capped at the API boundary)
+  createdAt  DateTime  @default(now())
+
+  organization Organization @relation("OrgApiKeys", fields: [orgId], references: [id], onDelete: Cascade)
+  usage        ApiUsage[]
+
+  @@index([orgId])
+  @@index([createdBy])
+  @@map("api_keys")
+}
+
+model ApiUsage {
+  id           String   @id @default(cuid())
+  apiKeyId     String
+  endpoint     String
+  method       String
+  statusCode   Int
+  latencyMs    Int
+  requestSize  Int?
+  responseSize Int?
+  ipAddress    String?
+  userAgent    String?
+  timestamp    DateTime @default(now())
+
+  apiKey ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@index([apiKeyId])
+  @@index([timestamp])
+  @@index([endpoint])
+  @@map("api_usage")
+}
+
+model Webhook {
+  id                  String    @id @default(cuid())
+  orgId               String
+  name                String
+  url                 String
+  /// HMAC signing secret, encrypted at rest (shown to the user once on create/rotate).
+  secretEncrypted     String    @db.Text
+  events              String[] // e.g., ["synthesis.completed", "recommendation.generated"]
+  active              Boolean   @default(true)
+  createdBy           String
+  lastTriggeredAt     DateTime?
+  failureCount        Int       @default(0)
+  consecutiveFailures Int       @default(0)
+  /// Set when auto-disabled after too many consecutive failures.
+  disabledAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  organization Organization      @relation("OrgWebhooks", fields: [orgId], references: [id], onDelete: Cascade)
+  deliveries   WebhookDelivery[]
+
+  @@index([orgId])
+  @@index([active])
+  @@index([createdAt])
+  @@map("webhooks")
+}
+
+model WebhookDelivery {
+  id           String    @id @default(cuid())
+  webhookId    String
+  event        String
+  payload      Json
+  statusCode   Int?
+  responseBody String?   @db.Text
+  durationMs   Int?
+  success      Boolean   @default(false)
+  attemptCount Int       @default(1)
+  deliveredAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+  @@index([event])
+  @@map("webhook_deliveries")
+}
+
+// ============================================================================
+// Platform foundations: job runs, domain events, token usage
+// ============================================================================
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum JobKind {
+  RECOMMENDATIONS
+  SENTIMENT
+  CORRELATION
+  KNOWLEDGE_EXTRACTION
+  COMPETITIVE_SCAN
+  COACHING
+  HANDOFF_EXPORT
+  WORKFLOW_MANUAL_RUN
+  ROADMAP_IMPORT
+  ANALYTICS_IMPORT
+}
+
+/// Generic tracking row for background work that has no natural row of its own.
+/// The sweeper fails rows stuck in PENDING/PROCESSING past their deadline.
+model JobRun {
+  id           String    @id @default(cuid())
+  kind         JobKind
+  orgId        String
+  projectId    String?
+  createdById  String?
+  status       JobStatus @default(PENDING)
+  input        Json?
+  output       Json?
+  errorMessage String?   @db.Text
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, kind, createdAt])
+  @@index([status, updatedAt])
+  @@map("job_runs")
+}
+
+/// Outbox of domain events. Every domain mutation records one; the event bus fans
+/// it out to workflows, webhooks, notifications, coach and team activity.
+model DomainEvent {
+  id             String    @id @default(cuid())
+  orgId          String
+  projectId      String?
+  /// e.g. "document.ready", "synthesis.completed", "recommendation.created"
+  type           String
+  payload        Json
+  actorUserId    String?
+  /// 0 for user/system-originated events; parent depth + 1 for workflow-originated ones.
+  causationDepth Int       @default(0)
+  /// Set once fan-out completes; the maintenance sweep re-dispatches stragglers.
+  dispatchedAt   DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt])
+  @@index([type, createdAt])
+  @@map("domain_events")
+}
+
+/// Persisted LLM/embedding token usage, attributed to org, project and feature.
+/// Drives per-org budgets (plan entitlements) and cost reporting.
+model TokenUsage {
+  id               String   @id @default(cuid())
+  orgId            String
+  projectId        String?
+  feature          String
+  provider         String // "anthropic" | "openai" | "deepgram"
+  model            String
+  inputTokens      Int      @default(0)
+  outputTokens     Int      @default(0)
+  cacheReadTokens  Int      @default(0)
+  cacheWriteTokens Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt])
+  @@map("token_usage")
+}
